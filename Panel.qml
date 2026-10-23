@@ -32,10 +32,16 @@ Panel {
   readonly property var cardBorder: Border.flat(Qt.rgba(fg.r, fg.g, fg.b, 0.28), 1)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property string modelName: snapshot && snapshot.online ? snapshot.model : "—"
-  readonly property string startLabel: serverRunning ? "Running" : (serverLaunchState === "starting" ? "Starting…" : (serverLaunchState === "error" ? "Retry start" : "Start server"))
+  readonly property string startLabel: serverLaunchState === "starting" ? "Starting…" : (serverLaunchState === "error" && !serverRunning ? "Retry start" : "Start")
+  readonly property string stopLabel: serverLaunchState === "stopping" ? "Stopping…" : "Stop"
+  readonly property bool startBusy: serverLaunchState === "starting" || serverLaunchState === "stopping"
+  readonly property bool stopBusy: serverLaunchState === "stopping"
+  readonly property bool canStart: !serverRunning && !startBusy
+  readonly property bool canStop: (serverRunning || serverLaunchState === "starting") && !stopBusy
 
   function refresh() { if (hostWidget && hostWidget.refresh) hostWidget.refresh() }
   function startServer() { if (hostWidget && hostWidget.startServer) hostWidget.startServer() }
+  function stopServer() { if (hostWidget && hostWidget.stopServer) hostWidget.stopServer() }
   function rateNumber(value) { return value === null || value === undefined ? "—" : Number(value).toFixed(1) }
   function toggle() { if (opened) close(); else open() }
   function open() { controller.show(); refresh() }
@@ -225,17 +231,35 @@ Panel {
           }
         }
 
-        Button {
-          width: content.width
-          text: root.startLabel
-          iconText: root.serverRunning ? "●" : (root.serverLaunchState === "starting" ? "◌" : "▶")
-          iconSpinning: root.serverLaunchState === "starting"
-          bordered: true
-          leftAlign: true
-          active: root.serverRunning
-          enabled: !root.serverRunning && root.serverLaunchState !== "starting"
-          tooltipText: root.serverRunning ? "Strata is already running" : (root.connectionMode === "local" ? "Run " + root.startScript : "SSH to " + root.sshTarget + " and run " + root.startScript)
-          onClicked: root.startServer()
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Button {
+            width: (parent.width - parent.spacing) / 2
+            text: root.startLabel
+            iconText: root.serverLaunchState === "starting" ? "◌" : "▶"
+            iconSpinning: root.serverLaunchState === "starting"
+            bordered: true
+            leftAlign: true
+            active: false
+            enabled: root.canStart
+            tooltipText: root.serverRunning ? "Strata is already running" : (root.connectionMode === "local" ? "Run " + root.startScript : "SSH to " + root.sshTarget + " and run " + root.startScript)
+            onClicked: root.startServer()
+          }
+
+          Button {
+            width: (parent.width - parent.spacing) / 2
+            text: root.stopLabel
+            iconText: root.serverLaunchState === "stopping" ? "◌" : "■"
+            iconSpinning: root.serverLaunchState === "stopping"
+            bordered: true
+            leftAlign: true
+            active: root.serverRunning
+            enabled: root.canStop
+            tooltipText: !root.serverRunning && root.serverLaunchState !== "starting" ? "Strata is not running" : (root.connectionMode === "local" ? "Stop the local Strata server" : "SSH to " + root.sshTarget + " and stop Strata")
+            onClicked: root.stopServer()
+          }
         }
 
         BorderSurface {
@@ -330,7 +354,7 @@ Panel {
         Text {
           visible: root.serverLaunchState === "error"
           width: parent.width
-          text: root.serverLaunchError || (root.connectionMode === "local" ? "Strata startup failed." : "SSH or Strata startup failed.")
+          text: root.serverLaunchError || (root.connectionMode === "local" ? "Strata start/stop failed." : "SSH or Strata start/stop failed.")
           textFormat: Text.PlainText
           wrapMode: Text.Wrap
           color: Color.urgent

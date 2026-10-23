@@ -19,10 +19,15 @@ test('offline and unresolved widget face visibly offers the server start action'
   assert.equal(model.widgetActionLabel(null, 'connecting', 'idle', false), '▶ START')
   assert.equal(model.widgetActionLabel(null, 'connecting', 'idle', true), '▶')
   assert.equal(model.widgetActionLabel({ online: false }, 'ok', 'starting', false), 'STARTING…')
+  assert.equal(model.widgetActionLabel({ online: true }, 'ok', 'stopping', false), 'STOPPING…')
   assert.equal(model.widgetActionLabel({ online: false }, 'ok', 'error', false), '↻ RETRY')
   assert.match(bar, /text:\s*Model\.clean\(root\.widgetLabel,\s*46\)/)
   assert.match(bar, /root\.requestStart\(\)/)
+  assert.match(bar, /Model\.stopCommand/)
   assert.match(bar, /connectionMode/)
+  assert.match(panel, /root\.stopServer\(\)/)
+  assert.match(panel, /text:\s*root\.startLabel/)
+  assert.match(panel, /text:\s*root\.stopLabel/)
 })
 
 test('background status refresh preserves visible data without checking copy', () => {

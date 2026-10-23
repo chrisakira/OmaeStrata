@@ -24,7 +24,7 @@ BarWidget {
   readonly property string label: Model.compact(snapshot, stateText, vertical)
   readonly property string tooltip: Model.tooltip(snapshot, stateText)
   readonly property string widgetLabel: Model.widgetActionLabel(snapshot, stateText, serverLaunchState, vertical)
-  readonly property string widgetActionTooltip: serverLaunchState === "starting" ? (connectionMode === "local" ? "Starting Strata locally" : "Starting Strata over SSH") : (serverLaunchState === "error" ? (connectionMode === "local" ? "Click to retry starting Strata" : "Click to retry starting Strata over SSH") : (!serverOnline ? (connectionMode === "local" ? "Click to start Strata locally; right-click for details; middle-click to refresh" : "Click to start Strata over SSH; right-click for details; middle-click to refresh") : tooltip))
+  readonly property string widgetActionTooltip: serverLaunchState === "starting" ? (connectionMode === "local" ? "Starting Strata locally" : "Starting Strata over SSH") : (serverLaunchState === "stopping" ? (connectionMode === "local" ? "Stopping Strata locally" : "Stopping Strata over SSH") : (serverLaunchState === "error" ? (connectionMode === "local" ? "Click to retry starting Strata" : "Click to retry starting Strata over SSH") : (!serverOnline ? (connectionMode === "local" ? "Click to start Strata locally; right-click for details; middle-click to refresh" : "Click to start Strata over SSH; right-click for details; middle-click to refresh") : tooltip)))
   property string serverLaunchState: "idle"
   property bool startRequested: false
   property var generationTokS: null
@@ -90,7 +90,8 @@ BarWidget {
 
   function refresh() { statusProc.running = false; Qt.callLater(function() { statusProc.running = true }) }
   function startServer() {
-    if (serverStartProc.running || serverOnline) return false
+    if (serverStartProc.running || serverStopProc.running || serverOnline) return false
+    if (serverLaunchState === "starting" || serverLaunchState === "stopping") return false
     serverLaunchError = ""
     generationTokS = null
     prefillTokS = null
@@ -99,8 +100,18 @@ BarWidget {
     startMetrics()
     return true
   }
+  function stopServer() {
+    if (serverStopProc.running || serverLaunchState === "stopping") return false
+    if (!serverOnline && !serverStartProc.running && serverLaunchState !== "starting") return false
+    serverLaunchError = ""
+    serverLaunchState = "stopping"
+    if (serverStartProc.running) serverStartProc.running = false
+    metricsProc.running = false
+    serverStopProc.running = true
+    return true
+  }
   function requestStart() {
-    if (serverStartProc.running || serverLaunchState === "starting") return false
+    if (serverStartProc.running || serverLaunchState === "starting" || serverLaunchState === "stopping") return false
     if (serverOnline) { togglePanel(); return false }
     if (stateText === "connecting") { startRequested = true; return true }
     return startServer()
@@ -136,10 +147,13 @@ BarWidget {
   onSettingsChanged: injectPanel()
   onSnapshotChanged: {
     if (serverOnline) {
-      serverLaunchState = "running"
-      startMetrics()
+      if (serverLaunchState !== "stopping") {
+        serverLaunchState = "running"
+        startMetrics()
+      }
     } else if (!serverStartProc.running) {
       metricsProc.running = false
+      if (serverLaunchState === "stopping" && !serverStopProc.running) serverLaunchState = "stopped"
     }
     if (root.startRequested) {
       root.startRequested = false
@@ -178,7 +192,11 @@ BarWidget {
         if (parsed) {
           root.snapshot = parsed
           root.stateText = "ok"
-          if (parsed.online) root.serverLaunchState = "running"
+          if (parsed.online) {
+            if (root.serverLaunchState !== "stopping") root.serverLaunchState = "running"
+          } else if (root.serverLaunchState === "stopping" && !serverStopProc.running) {
+            root.serverLaunchState = "stopped"
+          }
         } else root.stateText = "error"
         root.injectPanel()
       }
@@ -212,11 +230,31 @@ BarWidget {
     // request or environment details. The exit status is enough for the UI.
     stderr: SplitParser { onRead: function(line) {} }
     onRunningChanged: {
-      if (running && root.serverLaunchState !== "running") root.serverLaunchState = "starting"
+      if (running && root.serverLaunchState !== "running" && root.serverLaunchState !== "stopping") root.serverLaunchState = "starting"
     }
     onExited: function(exitCode) {
+      if (root.serverLaunchState === "stopping") return
       root.serverLaunchState = exitCode === 0 ? "stopped" : "error"
       root.serverLaunchError = exitCode === 0 ? "" : ((root.connectionMode === "local" ? "Strata startup failed" : "SSH or Strata startup failed") + " (exit " + exitCode + ").")
+      root.refresh()
+    }
+  }
+
+  Process {
+    id: serverStopProc
+    command: Model.stopCommand(root.sshTarget, root.processPattern, root.remoteConfig)
+    stdout: SplitParser { onRead: function(line) {} }
+    stderr: SplitParser { onRead: function(line) {} }
+    onRunningChanged: {
+      if (running) root.serverLaunchState = "stopping"
+    }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        if (!root.serverOnline) root.serverLaunchState = "stopped"
+      } else {
+        root.serverLaunchState = "error"
+        root.serverLaunchError = (root.connectionMode === "local" ? "Strata stop failed" : "SSH or Strata stop failed") + " (exit " + exitCode + ")."
+      }
       root.refresh()
     }
   }
@@ -240,7 +278,7 @@ BarWidget {
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.refresh()
       else if (b === Qt.RightButton) root.togglePanel()
-      else if (b === Qt.LeftButton && !root.serverOnline && root.serverLaunchState !== "starting") root.requestStart()
+      else if (b === Qt.LeftButton && !root.serverOnline && root.serverLaunchState !== "starting" && root.serverLaunchState !== "stopping") root.requestStart()
       else root.togglePanel()
     }
   }
