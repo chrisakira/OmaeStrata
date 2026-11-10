@@ -8,9 +8,28 @@ import "Model.js" as Model
 BarWidget {
   id: root
   moduleName: "io.github.akira.omaestrata"
+
   property var snapshot: null
   property string stateText: "connecting"
   property var envConfig: ({})
+  property var generationTokS: null
+  property var prefillTokS: null
+  property string serverLaunchState: "idle"
+  property bool startRequested: false
+  property string serverLaunchError: ""
+
+  // rolling history for the panel graphs (48 samples ≈ 8 min at 10s)
+  property var genHist: []
+  property var prefillHist: []
+  property var ramHist: []
+  property var cpuHist: []
+
+  readonly property color cyberCyan: "#00F0FF"
+  readonly property color cyberMagenta: "#FF2E88"
+  readonly property color cyberDim: "#4A6B78"
+  readonly property color cyberWhite: "#E8FBFF"
+  readonly property string cyberFont: "monospace"
+
   readonly property var remoteConfig: ({
     mode: connectionMode,
     strataRoot: Model.sanitizeRemotePath(Model.pick(envConfig, "STRATA_ROOT", "/home/akira/Strata"), "/home/akira/Strata"),
@@ -21,26 +40,31 @@ BarWidget {
   readonly property string sshTarget: Model.sanitizeSshTarget(Model.preferCustom(setting("sshTarget", "akira@192.168.1.168"), Model.pick(envConfig, "SSH_TARGET", ""), "akira@192.168.1.168"), "akira@192.168.1.168")
   readonly property int refreshSeconds: Math.max(5, Math.min(120, parseInt(Model.preferCustom(setting("refreshSeconds", 10), Model.pick(envConfig, "REFRESH_SECONDS", ""), 10), 10) || 10))
   readonly property string processPattern: String(Model.preferCustom(setting("strataProcessPattern", "strata"), Model.pick(envConfig, "PROCESS_PATTERN", ""), "strata")).replace(/[^A-Za-z0-9_.-]/g, "") || "strata"
-  readonly property string label: Model.compact(snapshot, stateText, vertical)
-  readonly property string tooltip: Model.tooltip(snapshot, stateText)
-  readonly property string widgetLabel: Model.widgetActionLabel(snapshot, stateText, serverLaunchState, vertical)
-  readonly property string widgetActionTooltip: serverLaunchState === "starting" ? (connectionMode === "local" ? "Starting Strata locally" : "Starting Strata over SSH") : (serverLaunchState === "error" ? (connectionMode === "local" ? "Click to retry starting Strata" : "Click to retry starting Strata over SSH") : (!serverOnline ? (connectionMode === "local" ? "Click to start Strata locally; right-click for details; middle-click to refresh" : "Click to start Strata over SSH; right-click for details; middle-click to refresh") : tooltip))
-  property string serverLaunchState: "idle"
-  property bool startRequested: false
-  property var generationTokS: null
-  property var prefillTokS: null
-  property string serverLaunchError: ""
+
   readonly property bool serverOnline: !!(snapshot && snapshot.online)
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened : false
   readonly property bool popoutSwitchClosing: false
-  readonly property real openPanelIndicatorWidth: button.labelWidth
+  readonly property real openPanelIndicatorWidth: chip.implicitWidth
   readonly property real openPanelIndicatorHeight: Math.max(Style.space(10), Math.round(Style.bar.iconSlot * 0.55))
+
+  readonly property string modelName: snapshot && snapshot.online ? String(snapshot.model || "MODEL") : "STRATA"
+  readonly property string chipRate: generationTokS === null || generationTokS === undefined ? "--" : Number(generationTokS).toFixed(1)
+  readonly property color chipAccent: stateText === "error" ? Color.urgent : (serverOnline ? cyberCyan : cyberMagenta)
+
+  function pushHist(arr, v) {
+    if (v === null || v === undefined || v === "") return arr
+    var n = Number(v)
+    if (!isFinite(n)) return arr
+    var out = arr.slice(Math.max(0, arr.length - 47))
+    out.push(n)
+    return out
+  }
 
   function injectPanel() {
     if (!panelLoader.item) return
     panelLoader.item.bar = root.bar
     panelLoader.item.settings = root.settings
-    panelLoader.item.anchorItem = button
+    panelLoader.item.anchorItem = anchorProbe
     panelLoader.item.hostWidget = root
     panelLoader.item.snapshot = root.snapshot
     panelLoader.item.stateText = root.stateText
@@ -53,7 +77,12 @@ BarWidget {
     panelLoader.item.generationTokS = root.generationTokS
     panelLoader.item.prefillTokS = root.prefillTokS
     panelLoader.item.serverLaunchError = root.serverLaunchError
+    panelLoader.item.genHist = root.genHist
+    panelLoader.item.prefillHist = root.prefillHist
+    panelLoader.item.ramHist = root.ramHist
+    panelLoader.item.cpuHist = root.cpuHist
   }
+
   function applyEnv() {
     var plugin = ""
     var user = ""
@@ -90,7 +119,8 @@ BarWidget {
 
   function refresh() { statusProc.running = false; Qt.callLater(function() { statusProc.running = true }) }
   function startServer() {
-    if (serverStartProc.running || serverOnline) return false
+    if (serverStartProc.running || serverStopProc.running || serverOnline) return false
+    if (serverLaunchState === "starting" || serverLaunchState === "stopping") return false
     serverLaunchError = ""
     generationTokS = null
     prefillTokS = null
@@ -99,8 +129,18 @@ BarWidget {
     startMetrics()
     return true
   }
+  function stopServer() {
+    if (serverStopProc.running || serverLaunchState === "stopping") return false
+    if (!serverOnline && !serverStartProc.running && serverLaunchState !== "starting") return false
+    serverLaunchError = ""
+    serverLaunchState = "stopping"
+    if (serverStartProc.running) serverStartProc.running = false
+    metricsProc.running = false
+    serverStopProc.running = true
+    return true
+  }
   function requestStart() {
-    if (serverStartProc.running || serverLaunchState === "starting") return false
+    if (serverStartProc.running || serverLaunchState === "starting" || serverLaunchState === "stopping") return false
     if (serverOnline) { togglePanel(); return false }
     if (stateText === "connecting") { startRequested = true; return true }
     return startServer()
@@ -129,17 +169,32 @@ BarWidget {
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function closeForPopoutSwitch() { close() }
+  function hoverTip() {
+    if (!root.bar) return
+    var t = serverOnline
+      ? modelName + " · gen " + chipRate + " tok/s" + (prefillTokS !== null ? " · prefill " + Number(prefillTokS).toFixed(1) : "")
+      : (stateText === "error" ? "Strata: connection error" : "Strata offline · click to start")
+    root.bar.showTooltip(root, Model.clean(t, 200))
+  }
 
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
+  implicitWidth: chip.implicitWidth
+  implicitHeight: chip.implicitHeight
+
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
   onSnapshotChanged: {
+    if (snapshot) {
+      ramHist = pushHist(ramHist, snapshot.ram)
+      cpuHist = pushHist(cpuHist, snapshot.cpu)
+    }
     if (serverOnline) {
-      serverLaunchState = "running"
-      startMetrics()
+      if (serverLaunchState !== "stopping") {
+        serverLaunchState = "running"
+        startMetrics()
+      }
     } else if (!serverStartProc.running) {
       metricsProc.running = false
+      if (serverLaunchState === "stopping" && !serverStopProc.running) serverLaunchState = "stopped"
     }
     if (root.startRequested) {
       root.startRequested = false
@@ -148,13 +203,19 @@ BarWidget {
     }
     injectPanel()
   }
+  onGenerationTokSChanged: {
+    genHist = pushHist(genHist, generationTokS)
+    injectPanel()
+  }
+  onPrefillTokSChanged: {
+    prefillHist = pushHist(prefillHist, prefillTokS)
+    injectPanel()
+  }
   onStateTextChanged: {
     if (stateText === "error" && startRequested) startRequested = false
     injectPanel()
   }
   onServerLaunchStateChanged: injectPanel()
-  onGenerationTokSChanged: injectPanel()
-  onPrefillTokSChanged: injectPanel()
   onServerLaunchErrorChanged: injectPanel()
   onSshTargetChanged: refresh()
   onRemoteConfigChanged: refresh()
@@ -168,6 +229,109 @@ BarWidget {
     onLoaded: { root.injectPanel(); Qt.callLater(root.injectPanel) }
   }
 
+  // zero-width probe at the chip's horizontal centre: the popup centres on this
+  Item {
+    id: anchorProbe
+    x: chip.width / 2
+    y: 0
+    width: 0
+    height: chip.height
+  }
+
+  // ---------- cyberpunk bar chip ----------
+  Rectangle {
+    id: chip
+    implicitWidth: row.implicitWidth + Style.space(16)
+    implicitHeight: Math.max(Style.bar.iconSlot, row.implicitHeight + Style.space(8))
+    color: hover.hovered ? Qt.rgba(0, 0.94, 1, 0.12) : Qt.rgba(0.02, 0.02, 0.06, 0.55)
+    radius: 3
+    border.width: 1
+    border.color: Qt.rgba(root.chipAccent.r, root.chipAccent.g, root.chipAccent.b, hover.hovered ? 0.9 : 0.55)
+
+    Row {
+      id: row
+      anchors.centerIn: parent
+      spacing: Style.space(6)
+
+      Rectangle {
+        width: 3
+        height: Math.round(chip.height * 0.45)
+        color: root.chipAccent
+        radius: 1
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.serverOnline ? String(root.modelName).toUpperCase() : (root.stateText === "error" ? "! STRATA" : (root.serverLaunchState === "starting" ? "◌ STRATA" : "▶ STRATA"))
+        color: root.chipAccent
+        font.family: root.cyberFont
+        font.pixelSize: 11
+        font.bold: true
+        font.letterSpacing: 0.8
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.serverOnline
+        text: "·"
+        color: root.cyberDim
+        font.family: root.cyberFont
+        font.pixelSize: 11
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.serverOnline
+        text: root.chipRate + " t/s"
+        color: root.cyberWhite
+        font.family: root.cyberFont
+        font.pixelSize: 11
+        font.bold: true
+      }
+
+      Canvas {
+        visible: root.serverOnline && root.genHist.length > 1
+        width: Style.space(38)
+        height: Math.round(chip.height * 0.5)
+        anchors.verticalCenter: parent.verticalCenter
+        onPaint: {
+          var ctx = getContext("2d")
+          ctx.reset()
+          var vals = root.genHist
+          if (vals.length < 2) return
+          var maxV = 1
+          for (var i = 0; i < vals.length; i++) if (vals[i] > maxV) maxV = vals[i]
+          ctx.strokeStyle = root.cyberCyan
+          ctx.lineWidth = 1.2
+          ctx.beginPath()
+          for (var j = 0; j < vals.length; j++) {
+            var x = width * (j / (vals.length - 1))
+            var y = height - (height - 2) * (vals[j] / maxV)
+            if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+          }
+          ctx.stroke()
+        }
+        onWidthChanged: requestPaint()
+        Connections { target: root; function onGenHistChanged() { requestPaint() } }
+      }
+    }
+
+    HoverHandler { id: hover; onHoveredChanged: { if (hovered) root.hoverTip(); else if (root.bar) root.bar.hideTooltip(root) } }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.MiddleButton) root.refresh()
+        else if (mouse.button === Qt.RightButton) root.togglePanel()
+        else if (!root.serverOnline && root.serverLaunchState !== "starting" && root.serverLaunchState !== "stopping") root.requestStart()
+        else root.togglePanel()
+      }
+    }
+  }
+
   Process {
     id: statusProc
     command: Model.command(root.sshTarget, root.processPattern, root.remoteConfig)
@@ -178,7 +342,11 @@ BarWidget {
         if (parsed) {
           root.snapshot = parsed
           root.stateText = "ok"
-          if (parsed.online) root.serverLaunchState = "running"
+          if (parsed.online) {
+            if (root.serverLaunchState !== "stopping") root.serverLaunchState = "running"
+          } else if (root.serverLaunchState === "stopping" && !serverStopProc.running) {
+            root.serverLaunchState = "stopped"
+          }
         } else root.stateText = "error"
         root.injectPanel()
       }
@@ -190,8 +358,6 @@ BarWidget {
     id: metricsProc
     command: Model.metricsCommand(root.sshTarget, root.remoteConfig)
     stdout: SplitParser { onRead: function(line) { root.consumeMetricsLine(line) } }
-    // Scan only the newest model log; the helper emits its filename/model and
-    // numeric rates, never raw log content, prompts, or generated text.
     stderr: SplitParser { onRead: function(line) {} }
   }
 
@@ -208,15 +374,33 @@ BarWidget {
     id: serverStartProc
     command: Model.startCommand(root.sshTarget, root.remoteConfig)
     stdout: SplitParser { onRead: function(line) { root.consumeServerLine(line) } }
-    // Drain but never display arbitrary remote stderr; it may contain sensitive
-    // request or environment details. The exit status is enough for the UI.
     stderr: SplitParser { onRead: function(line) {} }
     onRunningChanged: {
-      if (running && root.serverLaunchState !== "running") root.serverLaunchState = "starting"
+      if (running && root.serverLaunchState !== "running" && root.serverLaunchState !== "stopping") root.serverLaunchState = "starting"
     }
     onExited: function(exitCode) {
+      if (root.serverLaunchState === "stopping") return
       root.serverLaunchState = exitCode === 0 ? "stopped" : "error"
       root.serverLaunchError = exitCode === 0 ? "" : ((root.connectionMode === "local" ? "Strata startup failed" : "SSH or Strata startup failed") + " (exit " + exitCode + ").")
+      root.refresh()
+    }
+  }
+
+  Process {
+    id: serverStopProc
+    command: Model.stopCommand(root.sshTarget, root.processPattern, root.remoteConfig)
+    stdout: SplitParser { onRead: function(line) {} }
+    stderr: SplitParser { onRead: function(line) {} }
+    onRunningChanged: {
+      if (running) root.serverLaunchState = "stopping"
+    }
+    onExited: function(exitCode) {
+      if (exitCode === 0) {
+        if (!root.serverOnline) root.serverLaunchState = "stopped"
+      } else {
+        root.serverLaunchState = "error"
+        root.serverLaunchError = (root.connectionMode === "local" ? "Strata stop failed" : "SSH or Strata stop failed") + " (exit " + exitCode + ")."
+      }
       root.refresh()
     }
   }
@@ -226,22 +410,5 @@ BarWidget {
     running: true
     repeat: true
     onTriggered: root.refresh()
-  }
-
-  WidgetButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    text: Model.clean(root.widgetLabel, 46)
-    tooltipText: Model.clean(root.widgetActionTooltip, 450)
-    fontSize: 13
-    horizontalMargin: 8
-    verticalPadding: 6
-    onPressed: function(b) {
-      if (b === Qt.MiddleButton) root.refresh()
-      else if (b === Qt.RightButton) root.togglePanel()
-      else if (b === Qt.LeftButton && !root.serverOnline && root.serverLaunchState !== "starting") root.requestStart()
-      else root.togglePanel()
-    }
   }
 }

@@ -2,7 +2,7 @@
 
 [![Built for Omarchy: Plugin](https://raw.githubusercontent.com/tcballard/omarchy-badges/75975e5b5bf75e7ede3764bcd2950046f7abfe2c/badges/v1/omarchy-plugin.svg)](https://github.com/tcballard/omarchy-badges)
 
-Watch a Strata LLM server from the Omarchy bar — start it, see the model, tok/s, host load, and GPU stats. Works over SSH or on the same machine. NVIDIA and AMD.
+Watch a Strata LLM server from the Omarchy bar — start or stop it, see the model, tok/s, host load, and GPU stats. Works over SSH or on the same machine. NVIDIA and AMD.
 
 <p align="center">
   <img src="preview.png" alt="OmaeStrata panel: IQ3_S online, generation and prefill rates, host CPU/RAM/disk, two P100 GPUs" width="362" />
@@ -36,7 +36,7 @@ Needs Python 3 on the Strata host. SSH mode needs key-based login (`BatchMode=ye
 | Middle-click | Refresh now |
 | `R` in the panel | Refresh |
 
-The bar chip shows **▶ START** when the server is down, and **● MODEL** when it is up. Model identity comes from the newest `strata-*.log` filename (`strata-iq3_s.log` → `IQ3_S`). Rates are the latest completed request in that log, not a live token stream. Raw log lines, prompts, and generated text are never forwarded.
+The bar chip shows **▶ START** when the server is down, and **● MODEL** when it is up. The panel has **Start** and **Stop**. Stop SIGTERMs matching Strata processes (`serve/server.py --engine strata`, `strata.py serve`, or a `strata` binary) and SIGKILLs leftovers after 3s; plugin SSH/python helpers are ignored. Model identity comes from the newest `strata-*.log` filename (`strata-iq3_s.log` → `IQ3_S`). Rates are the latest completed request in that log, not a live token stream. Raw log lines, prompts, and generated text are never forwarded.
 
 ## Configure
 

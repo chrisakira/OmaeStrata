@@ -128,6 +128,28 @@ test('serve/server.py --engine strata is treated as the running server', () => {
   assert.equal(context.isStrataProcess(serverCmd, 'python', 'strata'), true)
 })
 
+const strataPyServe = '/home/sabinho/github/Strata/.venv/bin/python /home/sabinho/github/Strata/strata.py serve --profile strata-coder-iq1_m.json'
+
+test('strata.py serve is treated as the running server', () => {
+  assert.equal(context.isStrataProcess(strataPyServe, 'python', 'strata'), true)
+})
+
+test('stop command SIGTERMs matching processes over SSH and locally', () => {
+  const ssh = Array.from(context.stopCommand('akira@192.168.1.168', 'strata'))
+  assert.equal(ssh[0], 'ssh')
+  assert.ok(ssh.includes('BatchMode=yes'))
+  assert.equal(ssh.at(-2), 'akira@192.168.1.168')
+  assert.match(ssh.at(-1), /OMAESTRATA_HELPER=1/)
+  assert.match(ssh.at(-1), /SIGTERM/)
+  assert.match(ssh.at(-1), /SIGKILL/)
+  assert.match(ssh.at(-1), /strata\\.py/)
+  const local = Array.from(context.stopCommand('u@h', 'strata', { mode: 'local', strataRoot: '/opt/s', startScript: '/opt/s/run.sh', diskPath: '/' }))
+  assert.equal(local[0], 'env')
+  assert.ok(local.includes('python3'))
+  assert.ok(!local.includes('ssh'))
+  assert.ok(local.includes('OMAESTRATA_HELPER=1'))
+})
+
 test('status collector skips helpers and matches serve/server.py --engine', () => {
   const remote = Array.from(context.command('akira@192.168.1.168', 'strata')).at(-1)
   assert.match(remote, /os\.getpid/)

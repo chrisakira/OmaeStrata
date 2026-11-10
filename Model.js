@@ -19,6 +19,7 @@ function isStrataProcess(cmd, comm, pattern) {
   var line = String(cmd || "")
   if (String(comm || "").toLowerCase() === needle) return true
   if (/\bserve\/server\.py\b/.test(line) && line.toLowerCase().indexOf("--engine " + needle) !== -1) return true
+  if (/(?:^|[\/\s])strata\.py(?:\s|$)/.test(line) && /\bserve\b/.test(line)) return true
   var tokens = line.split(/\s+/)
   for (var i = 0; i < tokens.length && i < 12; i++) {
     var base = tokens[i].split("/").pop().toLowerCase()
@@ -113,6 +114,7 @@ function statusLabel(s, state) {
 
 function widgetActionLabel(s, state, launchState, vertical) {
   if (launchState === "starting") return vertical ? "◌" : "STARTING…"
+  if (launchState === "stopping") return vertical ? "■" : "STOPPING…"
   if (launchState === "error") return vertical ? "↻" : "↻ RETRY"
   if (state === "connecting" && !s) return vertical ? "▶" : "▶ START"
   if (s && s.online) return compact(s, state, vertical)
@@ -167,6 +169,7 @@ var REMOTE_PYTHON = [
   " if is_helper(cmd): return False",
   " if comm.lower()==pattern: return True",
   " if 'serve/server.py' in cmd and ('--engine '+pattern) in cmd.lower(): return True",
+  " if re.search(r'(?:^|[/\\s])strata\\.py(?:\\s|$)', cmd) and re.search(r'\\bserve\\b', cmd): return True",
   " return any(os.path.basename(tok).lower()==pattern for tok in cmd.split()[:12])",
   "procs=[]",
   "for p in os.listdir('/proc'):",
@@ -307,6 +310,53 @@ function startCommand(target, cfg) {
   var conf = configFrom(cfg)
   if (conf.mode === "local") return [conf.startScript]
   return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", String(target || "akira@192.168.1.168"), conf.startScript]
+}
+
+var STOP_PYTHON = [
+  "import os,re,signal,time",
+  "pattern=os.environ.get('OMAE_STRATA_PATTERN','strata').lower()",
+  "self_pid=str(os.getpid())",
+  "py_re=re.compile(r'python[0-9.]*\\s+(?:-[^\\s]+\\s+)*-c\\b')",
+  "sh_re=re.compile(r'(?:bash|sh)\\s+-c\\b')",
+  "def is_helper(cmd):",
+  " return ('OMAESTRATA_HELPER' in cmd) or bool(py_re.search(cmd) or sh_re.search(cmd))",
+  "def is_strata(cmd, comm):",
+  " if is_helper(cmd): return False",
+  " if comm.lower()==pattern: return True",
+  " if 'serve/server.py' in cmd and ('--engine '+pattern) in cmd.lower(): return True",
+  " if re.search(r'(?:^|[/\\s])strata\\.py(?:\\s|$)', cmd) and re.search(r'\\bserve\\b', cmd): return True",
+  " return any(os.path.basename(tok).lower()==pattern for tok in cmd.split()[:12])",
+  "pids=[]",
+  "for p in os.listdir('/proc'):",
+  " if not p.isdigit() or p==self_pid: continue",
+  " try:",
+  "  cmd=open('/proc/'+p+'/cmdline','rb').read().replace(bytes([0]),b' ').decode(errors='replace').strip()",
+  "  comm=open('/proc/'+p+'/comm','r',errors='replace').read().strip()",
+  "  if is_strata(cmd, comm): pids.append(int(p))",
+  " except: pass",
+  "for pid in pids:",
+  " try: os.kill(pid, signal.SIGTERM)",
+  " except: pass",
+  "deadline=time.time()+3",
+  "while time.time()<deadline:",
+  " alive=[pid for pid in pids if os.path.exists('/proc/'+str(pid))]",
+  " if not alive: break",
+  " time.sleep(0.2)",
+  "for pid in pids:",
+  " try:",
+  "  if os.path.exists('/proc/'+str(pid)): os.kill(pid, signal.SIGKILL)",
+  " except: pass",
+  "print('ok')"
+].join("\n")
+
+function stopCommand(target, pattern, cfg) {
+  var conf = configFrom(cfg)
+  var patternSafe = String(pattern || "strata").replace(/[^A-Za-z0-9_.-]/g, "")
+  if (conf.mode === "local") {
+    return ["env", "OMAESTRATA_HELPER=1", "OMAE_STRATA_PATTERN=" + patternSafe, "python3", "-c", STOP_PYTHON]
+  }
+  var remote = "OMAESTRATA_HELPER=1 OMAE_STRATA_PATTERN='" + patternSafe + "' python3 -c " + shellQuote(STOP_PYTHON)
+  return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "--", String(target || "akira@192.168.1.168"), remote]
 }
 
 function command(target, pattern, cfg) {
